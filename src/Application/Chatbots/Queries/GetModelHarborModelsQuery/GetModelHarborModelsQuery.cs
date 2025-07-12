@@ -31,9 +31,11 @@ public class GetModelHarborModelsQueryHandler : IRequestHandler<GetModelHarborMo
 
     public async Task<SelectList> Handle(GetModelHarborModelsQuery request, CancellationToken cancellationToken)
     {
-        if (_memoryCache.TryGetValue(CacheKey, out SelectList? cachedSelectList) && cachedSelectList != null)
+        // Try to get the cached list of SelectListItem instead of SelectList itself
+        if (_memoryCache.TryGetValue(CacheKey, out List<SelectListItem>? cachedItems) && cachedItems != null)
         {
-            return cachedSelectList;
+            // Always create a new SelectList with the current selected value
+            return new SelectList(cachedItems, "Value", "Text", request.SelectedValue);
         }
 
         try
@@ -48,11 +50,10 @@ public class GetModelHarborModelsQueryHandler : IRequestHandler<GetModelHarborMo
                 })
                 .ToList();
 
-            var selectList = new SelectList(selectListItems, "Value", "Text", request.SelectedValue);
+            // Cache only the items, not the SelectList itself
+            _memoryCache.Set(CacheKey, selectListItems, TimeSpan.FromSeconds(300));
 
-            _memoryCache.Set(CacheKey, selectList, TimeSpan.FromSeconds(300));
-
-            return selectList;
+            return new SelectList(selectListItems, "Value", "Text", request.SelectedValue);
         }
         catch (Exception ex)
         {

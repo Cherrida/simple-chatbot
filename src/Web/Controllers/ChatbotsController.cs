@@ -66,7 +66,10 @@ public class ChatbotsController : MvcController
         ViewData["Info"] = info;
 
         // Get model harbor models and create SelectList
-        var modelHarborModels = await Mediator.Send(new GetModelHarborModelsQuery());
+        var modelHarborModels = await Mediator.Send(new GetModelHarborModelsQuery()
+        {
+            SelectedValue = info.ModelName
+        });
         ViewData["ModelNameSelectList"] = modelHarborModels;
 
         return View();
