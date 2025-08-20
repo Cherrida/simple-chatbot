@@ -322,7 +322,7 @@ public class ProcessFileBackgroundService : BackgroundService
                 {
                     var base64 = Convert.ToBase64String(task.FileContent);
                     chunks = await openAiService.GetTextChunksFromFileAsync(
-                        base64, "application/pdf", chatbot.LlmKey!,  chatbot.ModelName,null, task.ChunkSize, task.OverlappingSize,
+                        base64, "application/pdf", chatbot.LlmKey!, chatbot.ModelName, null, task.ChunkSize, task.OverlappingSize,
                         cancellationToken);
                 }
                 else

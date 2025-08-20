@@ -16,9 +16,6 @@
       "env": {
         "ASPNETCORE_ENVIRONMENT": "Development"
       },
-      "sourceFileMap": {
-        "/Views": "${workspaceFolder}/src/Web/Views"
-      },
       "logging": {
         "moduleLoad": false,
         "exceptions": true,
@@ -26,7 +23,7 @@
       },
       "launchBrowser": {
         "enabled": true,
-        "args": "http://localhost:5000;https://localhost:5001"
+        "args": "http://localhost:5000;https://localhost:5009"
       }
     }
   ]

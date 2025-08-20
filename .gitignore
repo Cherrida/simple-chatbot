@@ -490,3 +490,6 @@ $RECYCLE.BIN/
 
 # Build number tracking files
 # **/BuildNumber.txt
+
+# YoYo AI version control directory
+.yoyo/
