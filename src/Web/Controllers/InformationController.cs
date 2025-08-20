@@ -88,4 +88,35 @@ public class InformationController : MvcController
             return PhysicalFile(filePath, legacyContentType, name);
         }
     }
+    
+    [HttpGet]
+    [Route("ucanfile/{organization}/{dateFolder}/{fileName}")]
+    public async Task<IActionResult> GetUcanFile(string organization, string dateFolder, string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(organization) || string.IsNullOrWhiteSpace(dateFolder) || string.IsNullOrWhiteSpace(fileName))
+            return BadRequest("Organization, date folder, and file name are required.");
+
+        // Sanitize inputs to prevent directory traversal attacks
+        organization = organization.Replace("..", "").Replace("/", "").Replace("\\", "");
+        dateFolder = dateFolder.Replace("..", "").Replace("/", "").Replace("\\", "");
+        fileName = fileName.Replace("..", "").Replace("/", "").Replace("\\", "");
+
+        var filePath = Path.Combine(WebHostEnvironment.ContentRootPath, "ucanfile", organization, dateFolder, fileName);
+
+        if (!System.IO.File.Exists(filePath))
+            return NotFound("File not found.");
+
+        string contentType;
+        try
+        {
+            contentType = MimeTypes.GetMimeType(Path.GetExtension(fileName));
+        }
+        catch
+        {
+            contentType = "application/octet-stream";
+        }
+
+        // For security, we'll force download for all ucanfile files
+        return PhysicalFile(filePath, contentType, fileName);
+    }
 }

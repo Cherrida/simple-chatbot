@@ -21,6 +21,7 @@ namespace ChatbotApi.Infrastructure.Processors.UcanFileProcessor
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IWebHostEnvironment _environment;
         private readonly IDistributedCache _cache;
+        private readonly ISystemService? _systemService;
 
         // Allowed extensions (lowercase, with dot)
         private static readonly string[] AllowedExtensions = new[] {
@@ -32,30 +33,66 @@ namespace ChatbotApi.Infrastructure.Processors.UcanFileProcessor
         // Organization list
         private static readonly string[] Organizations = new[] {
             "บริษัท อสมท จำกัด",
-            "กรมโยธาธิการและผังเมือง"
+            "กรมโยธาธิการและผังเมือง",
         };
 
         public UcanFileProcessor(
             ILogger<UcanFileProcessor> logger,
             IHttpClientFactory httpClientFactory,
             IWebHostEnvironment environment,
-            IDistributedCache cache)
+            IDistributedCache cache,
+            ISystemService? systemService = null)
         {
             _logger = logger;
             _httpClientFactory = httpClientFactory;
             _environment = environment;
             _cache = cache;
+            _systemService = systemService;
         }
 
         public async Task<LineReplyStatus> ProcessLineAsync(LineEvent evt, int chatbotId, string message, string userId, string replyToken, CancellationToken cancellationToken = default)
         {
-            // Check if user is responding with organization name
+            // Check if user is responding with organization name or in retrieval flow
             var cacheKey = $"ucanfile_{userId}";
             var cachedFileInfo = await _cache.GetObjectAsync<CachedFileInfo>(cacheKey);
             
+            // Check if user wants to retrieve files
+            if (message != null && message.Trim().Equals("GET", StringComparison.OrdinalIgnoreCase))
+            {
+                // Initiate file retrieval flow
+                var orgList = string.Join("\n- ", Organizations);
+                var promptMessage = $"โปรดเลือกหน่วยงานที่ต้องการดึงไฟล์:\n- {orgList}";
+                
+                // Cache that we're in retrieval mode
+                var retrievalState = new CachedFileInfo
+                {
+                    IsRetrievalMode = true
+                };
+                await _cache.SetObjectAsync(cacheKey, retrievalState, 1440); // Cache for 24 hours
+                
+                return new LineReplyStatus
+                {
+                    Status = 200,
+                    ReplyMessage = new LineReplyMessage
+                    {
+                        ReplyToken = replyToken,
+                        Messages = new System.Collections.Generic.List<LineMessage>
+                        {
+                            new LineTextMessage(promptMessage)
+                        }
+                    }
+                };
+            }
+            
             if (cachedFileInfo != null)
             {
-                // User is providing organization name
+                // Handle retrieval flow
+                if (cachedFileInfo.IsRetrievalMode)
+                {
+                    return await HandleFileRetrievalFlowAsync(message, userId, replyToken, cachedFileInfo, cacheKey);
+                }
+                
+                // Handle file upload flow - User is providing organization name
                 var orgName = message?.Trim();
                 if (string.IsNullOrWhiteSpace(orgName))
                 {
@@ -309,6 +346,11 @@ namespace ChatbotApi.Infrastructure.Processors.UcanFileProcessor
             public byte[] FileContent { get; set; } = Array.Empty<byte>();
             public string FileName { get; set; } = string.Empty;
             public string Extension { get; set; } = string.Empty;
+            
+            // For file retrieval flow
+            public bool IsRetrievalMode { get; set; } = false;
+            public string? SelectedOrganization { get; set; }
+            public List<string> FilesInOrganization { get; set; } = new List<string>();
         }
 
         private string FindClosestOrganization(string input)
@@ -370,6 +412,231 @@ namespace ChatbotApi.Infrastructure.Processors.UcanFileProcessor
             }
 
             return lcs;
+        }
+        
+        private async Task<LineReplyStatus> HandleFileRetrievalFlowAsync(string? message, string userId, string replyToken, CachedFileInfo cachedFileInfo, string cacheKey)
+        {
+            // State 1: Waiting for organization name
+            if (string.IsNullOrEmpty(cachedFileInfo.SelectedOrganization))
+            {
+                var orgName = message?.Trim();
+                if (string.IsNullOrWhiteSpace(orgName))
+                {
+                    var orgList = string.Join("\n- ", Organizations);
+                    var promptMessage = $"โปรดเลือกหน่วยงานที่ต้องการดึงไฟล์:\n- {orgList}";
+                    
+                    return new LineReplyStatus
+                    {
+                        Status = 200,
+                        ReplyMessage = new LineReplyMessage
+                        {
+                            ReplyToken = replyToken,
+                            Messages = new System.Collections.Generic.List<LineMessage>
+                            {
+                                new LineTextMessage(promptMessage)
+                            }
+                        }
+                    };
+                }
+                
+                // Find closest matching organization
+                var matchedOrg = FindClosestOrganization(orgName);
+                
+                // List files in organization directory (all date folders)
+                var orgPath = Path.Combine(_environment.ContentRootPath, "ucanfile", matchedOrg);
+                var files = new List<string>();
+                
+                if (Directory.Exists(orgPath))
+                {
+                    // Get all files from all date folders
+                    var dateFolders = Directory.GetDirectories(orgPath);
+                    foreach (var dateFolder in dateFolders)
+                    {
+                        var dateFiles = Directory.GetFiles(dateFolder);
+                        foreach (var file in dateFiles)
+                        {
+                            files.Add(Path.GetFileName(file));
+                        }
+                    }
+                }
+                
+                if (files.Count == 0)
+                {
+                    // Remove cached file info
+                    await _cache.RemoveAsync(cacheKey);
+                    
+                    return new LineReplyStatus
+                    {
+                        Status = 404,
+                        ReplyMessage = new LineReplyMessage
+                        {
+                            ReplyToken = replyToken,
+                            Messages = new System.Collections.Generic.List<LineMessage>
+                            {
+                                new LineTextMessage($"ไม่พบไฟล์ในหน่วยงาน {matchedOrg}")
+                            }
+                        }
+                    };
+                }
+                
+                // Update cache with selected organization and file list
+                cachedFileInfo.SelectedOrganization = matchedOrg;
+                cachedFileInfo.FilesInOrganization = files;
+                await _cache.SetObjectAsync(cacheKey, cachedFileInfo, 1440); // Cache for 24 hours
+                
+                // List files to user
+                var fileList = string.Join("\n- ", files);
+                var filePromptMessage = $"ไฟล์ในหน่วยงาน {matchedOrg}:\n- {fileList}\n\nโปรดระบุชื่อไฟล์ที่ต้องการดาวน์โหลด:";
+                
+                return new LineReplyStatus
+                {
+                    Status = 200,
+                    ReplyMessage = new LineReplyMessage
+                    {
+                        ReplyToken = replyToken,
+                        Messages = new System.Collections.Generic.List<LineMessage>
+                        {
+                            new LineTextMessage(filePromptMessage)
+                        }
+                    }
+                };
+            }
+            
+            // State 2: Waiting for file name
+            var fileName = message?.Trim();
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                var fileList = string.Join("\n- ", cachedFileInfo.FilesInOrganization);
+                var filePromptMessage = $"ไฟล์ในหน่วยงาน {cachedFileInfo.SelectedOrganization}:\n- {fileList}\n\nโปรดระบุชื่อไฟล์ที่ต้องการดาวน์โหลด:";
+                
+                return new LineReplyStatus
+                {
+                    Status = 200,
+                    ReplyMessage = new LineReplyMessage
+                    {
+                        ReplyToken = replyToken,
+                        Messages = new System.Collections.Generic.List<LineMessage>
+                        {
+                            new LineTextMessage(filePromptMessage)
+                        }
+                    }
+                };
+            }
+            
+            // Find closest matching file
+            var matchedFile = FindClosestFile(fileName, cachedFileInfo.FilesInOrganization);
+            if (string.IsNullOrEmpty(matchedFile))
+            {
+                var fileList = string.Join("\n- ", cachedFileInfo.FilesInOrganization);
+                var filePromptMessage = $"ไม่พบไฟล์ที่ตรงกับ '{fileName}'\nไฟล์ในหน่วยงาน {cachedFileInfo.SelectedOrganization}:\n- {fileList}\n\nโปรดระบุชื่อไฟล์ที่ต้องการดาวน์โหลด:";
+                
+                return new LineReplyStatus
+                {
+                    Status = 404,
+                    ReplyMessage = new LineReplyMessage
+                    {
+                        ReplyToken = replyToken,
+                        Messages = new System.Collections.Generic.List<LineMessage>
+                        {
+                            new LineTextMessage(filePromptMessage)
+                        }
+                    }
+                };
+            }
+            
+            // Generate download URL
+            // URL format: /ucanfile/{organization}/{dateFolder}/{fileName}
+            var orgBasePath = Path.Combine(_environment.ContentRootPath, "ucanfile", cachedFileInfo.SelectedOrganization);
+            string? downloadUrl = null;
+            string? fullPath = null;
+            
+            if (Directory.Exists(orgBasePath))
+            {
+                // Search for the file in all date folders
+                var dateFolders = Directory.GetDirectories(orgBasePath);
+                foreach (var dateFolder in dateFolders)
+                {
+                    var filePath = Path.Combine(dateFolder, matchedFile);
+                    if (File.Exists(filePath))
+                    {
+                        fullPath = filePath;
+                        var dateFolderName = Path.GetFileName(dateFolder);
+                        downloadUrl = $"/ucanfile/{Uri.EscapeDataString(cachedFileInfo.SelectedOrganization)}/{Uri.EscapeDataString(dateFolderName)}/{Uri.EscapeDataString(matchedFile)}";
+                        break;
+                    }
+                }
+            }
+            
+            // Remove cached file info
+            await _cache.RemoveAsync(cacheKey);
+            
+            if (string.IsNullOrEmpty(downloadUrl))
+            {
+                return new LineReplyStatus
+                {
+                    Status = 404,
+                    ReplyMessage = new LineReplyMessage
+                    {
+                        ReplyToken = replyToken,
+                        Messages = new System.Collections.Generic.List<LineMessage>
+                        {
+                            new LineTextMessage($"ไม่พบไฟล์ {matchedFile}")
+                        }
+                    }
+                };
+            }
+            
+            return new LineReplyStatus
+            {
+                Status = 200,
+                ReplyMessage = new LineReplyMessage
+                {
+                    ReplyToken = replyToken,
+                    Messages = new System.Collections.Generic.List<LineMessage>
+                    {
+                        new LineTextMessage($"คลิกที่ลิงก์เพื่อดาวน์โหลดไฟล์:\n{GetFullHostName()}{downloadUrl}")
+                    }
+                }
+            };
+        }
+        
+        private string FindClosestFile(string input, List<string> files)
+        {
+            // Exact match first
+            foreach (var file in files)
+            {
+                if (file.Equals(input, StringComparison.OrdinalIgnoreCase))
+                {
+                    return file;
+                }
+            }
+            
+            // Find closest match using simple string similarity
+            string bestMatch = string.Empty;
+            int bestScore = 0;
+            
+            foreach (var file in files)
+            {
+                int score = CalculateSimilarity(input, file);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestMatch = file;
+                }
+            }
+            
+            return bestMatch;
+        }
+        
+        private string GetFullHostName()
+        {
+            if (_systemService != null)
+            {
+                return _systemService.FullHostName;
+            }
+            
+            // Fallback to a default hostname
+            return "http://localhost:5000";
         }
     }
 }
